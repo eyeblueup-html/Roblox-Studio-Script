@@ -1,0 +1,840 @@
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local ContextActionService = game:GetService("ContextActionService")
+
+local player = Players.LocalPlayer
+local mouse = player:GetMouse()
+local playerGui = player:WaitForChild("PlayerGui")
+
+local selection = {}
+local selected = nil
+local tool = "Move"
+local dragging = false
+local dragMode = nil
+local dragData = {}
+
+local MOVE_SNAP = 1
+local SCALE_SNAP = 0.25
+local ROTATE_SNAP = 15
+
+local hoverBox = Instance.new("SelectionBox")
+hoverBox.Name = "BuildHover"
+hoverBox.LineThickness = 0.025
+hoverBox.Color3 = Color3.fromRGB(255, 255, 255)
+hoverBox.SurfaceTransparency = 1
+hoverBox.Parent = workspace
+
+local selectionFolder = Instance.new("Folder")
+selectionFolder.Name = "BuildSelectionVisuals"
+selectionFolder.Parent = workspace
+
+local handles = Instance.new("Handles")
+handles.Name = "BuildHandles"
+handles.Color3 = Color3.fromRGB(255, 255, 255)
+handles.Transparency = 0
+handles.Parent = playerGui
+
+local rotateHandles = Instance.new("ArcHandles")
+rotateHandles.Name = "BuildRotateHandles"
+rotateHandles.Color3 = Color3.fromRGB(255, 255, 255)
+rotateHandles.Transparency = 0
+rotateHandles.Parent = playerGui
+
+local proxy = Instance.new("Part")
+proxy.Name = "BuildGizmoProxy"
+proxy.Size = Vector3.new(1, 1, 1)
+proxy.Transparency = 1
+proxy.Anchored = true
+proxy.CanCollide = false
+proxy.CanTouch = false
+proxy.CanQuery = false
+proxy.CastShadow = false
+proxy.Locked = true
+proxy.Parent = workspace
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "BuildGui"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.DisplayOrder = 100
+gui.Parent = playerGui
+
+local toolbar = Instance.new("Frame")
+toolbar.Name = "Toolbar"
+toolbar.Size = UDim2.fromOffset(700, 64)
+toolbar.Position = UDim2.new(0.5, -350, 1, -82)
+toolbar.BackgroundColor3 = Color3.fromRGB(38, 40, 43)
+toolbar.BorderSizePixel = 0
+toolbar.Parent = gui
+
+local toolbarCorner = Instance.new("UICorner")
+toolbarCorner.CornerRadius = UDim.new(0, 8)
+toolbarCorner.Parent = toolbar
+
+local toolbarStroke = Instance.new("UIStroke")
+toolbarStroke.Color = Color3.fromRGB(70, 73, 78)
+toolbarStroke.Thickness = 1
+toolbarStroke.Parent = toolbar
+
+local layout = Instance.new("UIListLayout")
+layout.FillDirection = Enum.FillDirection.Horizontal
+layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+layout.VerticalAlignment = Enum.VerticalAlignment.Center
+layout.Padding = UDim.new(0, 7)
+layout.Parent = toolbar
+
+local function makeButton(name, text, width)
+	local button = Instance.new("TextButton")
+	button.Name = name
+	button.Size = UDim2.fromOffset(width or 88, 46)
+	button.BackgroundColor3 = Color3.fromRGB(53, 56, 60)
+	button.TextColor3 = Color3.fromRGB(235, 235, 235)
+	button.Text = text
+	button.TextSize = 15
+	button.Font = Enum.Font.GothamMedium
+	button.AutoButtonColor = false
+	button.Parent = toolbar
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 6)
+	corner.Parent = button
+
+	return button
+end
+
+local moveButton = makeButton("MoveButton", "Move [1]", 95)
+local scaleButton = makeButton("ScaleButton", "Scale [2]", 95)
+local rotateButton = makeButton("RotateButton", "Rotate [3]", 105)
+local anchorButton = makeButton("AnchorButton", "Anchor: OFF", 120)
+local deleteButton = makeButton("DeleteButton", "Delete", 88)
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Name = "SelectionStatus"
+statusLabel.Size = UDim2.fromOffset(145, 46)
+statusLabel.BackgroundTransparency = 1
+statusLabel.TextColor3 = Color3.fromRGB(190, 195, 202)
+statusLabel.Text = "0 selected"
+statusLabel.TextSize = 14
+statusLabel.Font = Enum.Font.Gotham
+statusLabel.TextXAlignment = Enum.TextXAlignment.Center
+statusLabel.Parent = toolbar
+
+local function validTarget(part)
+	if not part then
+		return false
+	end
+
+	if not part:IsA("BasePart") then
+		return false
+	end
+
+	if part == proxy then
+		return false
+	end
+
+	if part:IsDescendantOf(selectionFolder) then
+		return false
+	end
+
+	if player.Character and part:IsDescendantOf(player.Character) then
+		return false
+	end
+
+	return true
+end
+
+local function isSelected(part)
+	for _, object in ipairs(selection) do
+		if object == part then
+			return true
+		end
+	end
+
+	return false
+end
+
+local function removeFromSelection(part)
+	for i = #selection, 1, -1 do
+		if selection[i] == part then
+			table.remove(selection, i)
+			return
+		end
+	end
+end
+
+local function clearVisuals()
+	for _, object in ipairs(selectionFolder:GetChildren()) do
+		object:Destroy()
+	end
+end
+
+local function updateSelectionVisuals()
+	clearVisuals()
+
+	for _, part in ipairs(selection) do
+		if part and part.Parent then
+			local box = Instance.new("SelectionBox")
+			box.Name = "Selection"
+			box.Adornee = part
+			box.LineThickness = part == selected and 0.07 or 0.045
+			box.Color3 = part == selected
+				and Color3.fromRGB(0, 170, 255)
+				or Color3.fromRGB(80, 140, 255)
+			box.SurfaceTransparency = 1
+			box.Parent = selectionFolder
+		end
+	end
+end
+
+local function updateAnchorDisplay()
+	local count = #selection
+
+	statusLabel.Text = tostring(count) .. " selected"
+
+	if count == 0 then
+		anchorButton.Text = "Anchor: OFF"
+		anchorButton.BackgroundColor3 = Color3.fromRGB(53, 56, 60)
+		return
+	end
+
+	local anchored = 0
+
+	for _, part in ipairs(selection) do
+		if part and part.Parent and part.Anchored then
+			anchored += 1
+		end
+	end
+
+	if anchored == count then
+		anchorButton.Text = "Anchor: ON"
+		anchorButton.BackgroundColor3 = Color3.fromRGB(70, 125, 78)
+	elseif anchored == 0 then
+		anchorButton.Text = "Anchor: OFF"
+		anchorButton.BackgroundColor3 = Color3.fromRGB(53, 56, 60)
+	else
+		anchorButton.Text = "Anchor: MIXED"
+		anchorButton.BackgroundColor3 = Color3.fromRGB(125, 105, 55)
+	end
+end
+
+local function getSelectionBounds()
+	if #selection == 0 then
+		return nil
+	end
+
+	local minX = math.huge
+	local minY = math.huge
+	local minZ = math.huge
+	local maxX = -math.huge
+	local maxY = -math.huge
+	local maxZ = -math.huge
+
+	local found = false
+
+	for _, part in ipairs(selection) do
+		if part and part.Parent then
+			found = true
+
+			local cf = part.CFrame
+			local half = part.Size * 0.5
+
+			local x = cf.RightVector * half.X
+			local y = cf.UpVector * half.Y
+			local z = cf.LookVector * half.Z
+
+			local extents = Vector3.new(
+				math.abs(x.X) + math.abs(y.X) + math.abs(z.X),
+				math.abs(x.Y) + math.abs(y.Y) + math.abs(z.Y),
+				math.abs(x.Z) + math.abs(y.Z) + math.abs(z.Z)
+			)
+
+			local position = part.Position
+
+			minX = math.min(minX, position.X - extents.X)
+			minY = math.min(minY, position.Y - extents.Y)
+			minZ = math.min(minZ, position.Z - extents.Z)
+
+			maxX = math.max(maxX, position.X + extents.X)
+			maxY = math.max(maxY, position.Y + extents.Y)
+			maxZ = math.max(maxZ, position.Z + extents.Z)
+		end
+	end
+
+	if not found then
+		return nil
+	end
+
+	local minVector = Vector3.new(minX, minY, minZ)
+	local maxVector = Vector3.new(maxX, maxY, maxZ)
+
+	return (minVector + maxVector) * 0.5, maxVector - minVector
+end
+
+local function updateProxy()
+	local center, size = getSelectionBounds()
+
+	if not center then
+		proxy.CFrame = CFrame.new()
+		proxy.Size = Vector3.new(1, 1, 1)
+		return
+	end
+
+	local rotation = CFrame.identity
+
+	if selected and selected.Parent then
+		rotation = selected.CFrame.Rotation
+	end
+
+	proxy.CFrame = CFrame.new(center) * rotation
+	proxy.Size = Vector3.new(
+		math.max(size.X, 0.1),
+		math.max(size.Y, 0.1),
+		math.max(size.Z, 0.1)
+	)
+end
+
+local function updateHandles()
+	if #selection == 0 then
+		handles.Adornee = nil
+		rotateHandles.Adornee = nil
+		return
+	end
+
+	if tool == "Rotate" then
+		handles.Adornee = nil
+		rotateHandles.Adornee = proxy
+	else
+		rotateHandles.Adornee = nil
+		handles.Adornee = proxy
+
+		if tool == "Move" then
+			handles.Style = Enum.HandlesStyle.Movement
+		else
+			handles.Style = Enum.HandlesStyle.Resize
+			handles.Faces = Faces.new(
+				Enum.NormalId.Top,
+				Enum.NormalId.Bottom,
+				Enum.NormalId.Front,
+				Enum.NormalId.Back,
+				Enum.NormalId.Left,
+				Enum.NormalId.Right
+			)
+		end
+	end
+end
+
+local function refreshSelection()
+	updateSelectionVisuals()
+	updateAnchorDisplay()
+	updateProxy()
+	updateHandles()
+end
+
+local function clearSelection()
+	selection = {}
+	selected = nil
+	dragging = false
+	dragMode = nil
+	dragData = {}
+
+	hoverBox.Adornee = nil
+	handles.Adornee = nil
+	rotateHandles.Adornee = nil
+
+	refreshSelection()
+end
+
+local function selectOnly(part)
+	if not validTarget(part) then
+		clearSelection()
+		return
+	end
+
+	selection = {part}
+	selected = part
+
+	refreshSelection()
+end
+
+local function toggleSelection(part)
+	if not validTarget(part) then
+		return
+	end
+
+	if isSelected(part) then
+		removeFromSelection(part)
+
+		if selected == part then
+			selected = selection[#selection]
+		end
+	else
+		table.insert(selection, part)
+		selected = part
+	end
+
+	refreshSelection()
+end
+
+local function setTool(newTool)
+	if dragging then
+		return
+	end
+
+	tool = newTool
+
+	moveButton.BackgroundColor3 = tool == "Move"
+		and Color3.fromRGB(76, 118, 184)
+		or Color3.fromRGB(53, 56, 60)
+
+	scaleButton.BackgroundColor3 = tool == "Scale"
+		and Color3.fromRGB(76, 118, 184)
+		or Color3.fromRGB(53, 56, 60)
+
+	rotateButton.BackgroundColor3 = tool == "Rotate"
+		and Color3.fromRGB(76, 118, 184)
+		or Color3.fromRGB(53, 56, 60)
+
+	updateHandles()
+end
+
+local function deleteSelected()
+	if #selection == 0 then
+		return
+	end
+
+	local objects = table.clone(selection)
+
+	selection = {}
+	selected = nil
+
+	for _, part in ipairs(objects) do
+		if part and part.Parent then
+			part:Destroy()
+		end
+	end
+
+	refreshSelection()
+end
+
+local function toggleAnchor()
+	if #selection == 0 then
+		return
+	end
+
+	local shouldAnchor = false
+
+	for _, part in ipairs(selection) do
+		if part and part.Parent and not part.Anchored then
+			shouldAnchor = true
+			break
+		end
+	end
+
+	for _, part in ipairs(selection) do
+		if part and part.Parent then
+			part.Anchored = shouldAnchor
+		end
+	end
+
+	updateAnchorDisplay()
+end
+
+local function snap(value, increment)
+	return math.round(value / increment) * increment
+end
+
+local function mouseOverToolbar()
+	local position = UserInputService:GetMouseLocation()
+
+	for _, object in ipairs(
+		playerGui:GetGuiObjectsAtPosition(position.X, position.Y)
+		) do
+		if object:IsDescendantOf(toolbar) then
+			return true
+		end
+	end
+
+	return false
+end
+
+local function captureDragData()
+	dragData = {}
+
+	local center, size = getSelectionBounds()
+
+	if not center then
+		return
+	end
+
+	for _, part in ipairs(selection) do
+		if part and part.Parent then
+			table.insert(dragData, {
+				part = part,
+				cframe = part.CFrame,
+				size = part.Size,
+				position = part.Position
+			})
+		end
+	end
+
+	dragData.center = center
+	dragData.size = size
+	dragData.proxyCFrame = proxy.CFrame
+end
+
+local function moveSelection(face, distance)
+	local snapped = snap(distance, MOVE_SNAP)
+
+	local localDirection = Vector3.FromNormalId(face)
+	local worldDirection =
+		dragData.proxyCFrame:VectorToWorldSpace(localDirection)
+
+	local offset = worldDirection * snapped
+
+	for _, data in ipairs(dragData) do
+		if data.part and data.part.Parent then
+			data.part.CFrame = data.cframe + offset
+		end
+	end
+end
+
+local function scaleSelection(face, distance)
+	local snapped = snap(distance, SCALE_SNAP)
+
+	local localDirection = Vector3.FromNormalId(face)
+	local worldDirection =
+		dragData.proxyCFrame:VectorToWorldSpace(localDirection)
+
+	local axisSize
+
+	if math.abs(localDirection.X) > 0 then
+		axisSize = dragData.size.X
+	elseif math.abs(localDirection.Y) > 0 then
+		axisSize = dragData.size.Y
+	else
+		axisSize = dragData.size.Z
+	end
+
+	if axisSize <= 0.001 then
+		return
+	end
+
+	local newAxisSize = math.max(0.05, axisSize + snapped)
+	local factor = newAxisSize / axisSize
+
+	for _, data in ipairs(dragData) do
+		if data.part and data.part.Parent then
+			local relative = data.position - dragData.center
+			local projected = relative:Dot(worldDirection)
+			local perpendicular =
+				relative - worldDirection * projected
+
+			local newProjected = projected * factor
+
+			local newPosition =
+				dragData.center
+				+ perpendicular
+				+ worldDirection * newProjected
+
+			local oldSize = data.size
+			local newSize
+
+			if math.abs(localDirection.X) > 0 then
+				newSize = Vector3.new(
+					math.max(0.05, oldSize.X * factor),
+					oldSize.Y,
+					oldSize.Z
+				)
+			elseif math.abs(localDirection.Y) > 0 then
+				newSize = Vector3.new(
+					oldSize.X,
+					math.max(0.05, oldSize.Y * factor),
+					oldSize.Z
+				)
+			else
+				newSize = Vector3.new(
+					oldSize.X,
+					oldSize.Y,
+					math.max(0.05, oldSize.Z * factor)
+				)
+			end
+
+			data.part.Size = newSize
+			data.part.CFrame =
+				CFrame.new(newPosition)
+				* data.cframe.Rotation
+		end
+	end
+end
+
+local function rotateSelection(axis, angle)
+	local snappedDegrees =
+		snap(math.deg(angle), ROTATE_SNAP)
+
+	local radians = math.rad(snappedDegrees)
+
+	local localAxis
+
+	if axis == Enum.Axis.X then
+		localAxis = Vector3.new(1, 0, 0)
+	elseif axis == Enum.Axis.Y then
+		localAxis = Vector3.new(0, 1, 0)
+	else
+		localAxis = Vector3.new(0, 0, 1)
+	end
+
+	local worldAxis =
+		dragData.proxyCFrame:VectorToWorldSpace(localAxis)
+
+	local rotation =
+		CFrame.fromAxisAngle(worldAxis, radians)
+
+	for _, data in ipairs(dragData) do
+		if data.part and data.part.Parent then
+			local relative =
+				data.position - dragData.center
+
+			local newPosition =
+				dragData.center
+				+ rotation:VectorToWorldSpace(relative)
+
+			data.part.CFrame =
+				CFrame.new(newPosition)
+				* rotation
+				* data.cframe.Rotation
+		end
+	end
+end
+
+moveButton.MouseButton1Click:Connect(function()
+	setTool("Move")
+end)
+
+scaleButton.MouseButton1Click:Connect(function()
+	setTool("Scale")
+end)
+
+rotateButton.MouseButton1Click:Connect(function()
+	setTool("Rotate")
+end)
+
+anchorButton.MouseButton1Click:Connect(function()
+	toggleAnchor()
+end)
+
+deleteButton.MouseButton1Click:Connect(function()
+	deleteSelected()
+end)
+
+mouse.Button1Down:Connect(function()
+	if dragging then
+		return
+	end
+
+	if mouseOverToolbar() then
+		return
+	end
+
+	local target = mouse.Target
+
+	local shift =
+		UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
+		or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+
+	if validTarget(target) then
+		if shift then
+			toggleSelection(target)
+		else
+			selectOnly(target)
+		end
+	elseif not shift then
+		clearSelection()
+	end
+end)
+
+handles.MouseButton1Down:Connect(function(face)
+	if #selection == 0 then
+		return
+	end
+
+	dragging = true
+	dragMode = tool
+
+	captureDragData()
+
+	hoverBox.Adornee = nil
+end)
+
+handles.MouseDrag:Connect(function(face, distance)
+	if not dragging then
+		return
+	end
+
+	if #selection == 0 then
+		return
+	end
+
+	if dragMode == "Move" then
+		moveSelection(face, distance)
+	elseif dragMode == "Scale" then
+		scaleSelection(face, distance)
+	end
+
+	updateProxy()
+end)
+
+handles.MouseButton1Up:Connect(function()
+	dragging = false
+	dragMode = nil
+	dragData = {}
+
+	updateProxy()
+	updateHandles()
+end)
+
+rotateHandles.MouseButton1Down:Connect(function(axis)
+	if #selection == 0 then
+		return
+	end
+
+	dragging = true
+	dragMode = "Rotate"
+
+	captureDragData()
+
+	hoverBox.Adornee = nil
+end)
+
+rotateHandles.MouseDrag:Connect(function(axis, relativeAngle, deltaRadius)
+	if not dragging then
+		return
+	end
+
+	if #selection == 0 then
+		return
+	end
+
+	rotateSelection(axis, relativeAngle)
+	updateProxy()
+end)
+
+rotateHandles.MouseButton1Up:Connect(function()
+	dragging = false
+	dragMode = nil
+	dragData = {}
+
+	updateProxy()
+	updateHandles()
+end)
+
+local function keybindAction(actionName, inputState, inputObject)
+	if inputState ~= Enum.UserInputState.Begin then
+		return Enum.ContextActionResult.Pass
+	end
+
+	if UserInputService:GetFocusedTextBox() then
+		return Enum.ContextActionResult.Pass
+	end
+
+	if inputObject.KeyCode == Enum.KeyCode.One then
+		setTool("Move")
+		return Enum.ContextActionResult.Sink
+	end
+
+	if inputObject.KeyCode == Enum.KeyCode.Two then
+		setTool("Scale")
+		return Enum.ContextActionResult.Sink
+	end
+
+	if inputObject.KeyCode == Enum.KeyCode.Three then
+		setTool("Rotate")
+		return Enum.ContextActionResult.Sink
+	end
+
+	if inputObject.KeyCode == Enum.KeyCode.Delete
+		or inputObject.KeyCode == Enum.KeyCode.Backspace then
+		deleteSelected()
+		return Enum.ContextActionResult.Sink
+	end
+
+	return Enum.ContextActionResult.Pass
+end
+
+ContextActionService:BindActionAtPriority(
+	"BuildToolKeyboard",
+	keybindAction,
+	false,
+	3000,
+	Enum.KeyCode.One,
+	Enum.KeyCode.Two,
+	Enum.KeyCode.Three,
+	Enum.KeyCode.Delete,
+	Enum.KeyCode.Backspace
+)
+
+RunService.RenderStepped:Connect(function()
+	if dragging then
+		if hoverBox.Adornee ~= nil then
+			hoverBox.Adornee = nil
+		end
+		return
+	end
+
+	local target = mouse.Target
+
+	if validTarget(target) and not isSelected(target) then
+		if hoverBox.Adornee ~= target then
+			hoverBox.Adornee = target
+		end
+	else
+		if hoverBox.Adornee ~= nil then
+			hoverBox.Adornee = nil
+		end
+	end
+end)
+
+local lastSelectionCount = 0
+local lastSelected = nil
+
+RunService.Heartbeat:Connect(function()
+	local changed = false
+
+	for i = #selection, 1, -1 do
+		local part = selection[i]
+
+		if not part or not part.Parent then
+			table.remove(selection, i)
+			changed = true
+		end
+	end
+
+	if selected and not selected.Parent then
+		selected = selection[#selection]
+		changed = true
+	end
+
+	if #selection ~= lastSelectionCount then
+		changed = true
+	end
+
+	if selected ~= lastSelected then
+		changed = true
+	end
+
+	if changed then
+		lastSelectionCount = #selection
+		lastSelected = selected
+
+		updateSelectionVisuals()
+		updateAnchorDisplay()
+		updateProxy()
+		updateHandles()
+	end
+end)
+
+setTool("Move")
+updateSelectionVisuals()
+updateAnchorDisplay()
+updateProxy()
+updateHandles()
